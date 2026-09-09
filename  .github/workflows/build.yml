@@ -1,1 +1,467 @@
+name: Build Hedes APK
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project files
+        run: |
+          mkdir -p assets
+          cat > main.py << 'PYEOF'
+          import base64
+          import datetime
+          import json
+          import re
+          import threading
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          import requests
+          from kivy.app import App
+          from kivy.clock import Clock
+          from kivy.core.window import Window
+          from kivy.factory import Factory
+          from kivy.lang import Builder
+          from kivy.uix.boxlayout import BoxLayout
+          from kivy.uix.gridlayout import GridLayout
+          from kivy.uix.label import Label
+          from kivy.uix.popup import Popup
+          from kivy.uix.screenmanager import ScreenManager, Screen
+          from kivy.uix.scrollview import ScrollView
+          from kivy.uix.textinput import TextInput
+          from kivy.utils import platform
+
+          Window.clearcolor = (0.05, 0.05, 0.05, 1)
+
+          KV = '''
+          <HedesButton@Button>:
+              background_normal: ''
+              background_down: ''
+              color: 0, 0, 0, 1
+              bold: True
+              font_size: '14sp'
+              size_hint_y: None
+              height: '50dp'
+              canvas.before:
+                  Color:
+                      rgba: 1, 1, 1, 1
+                  RoundedRectangle:
+                      pos: self.pos
+                      size: self.size
+                      radius: [10]
+          <HedesInput@TextInput>:
+              background_normal: ''
+              background_active: ''
+              foreground_color: 1, 1, 1, 1
+              cursor_color: 1, 1, 1, 1
+              font_size: '14sp'
+              padding: [12, 10]
+              size_hint_y: None
+              height: '46dp'
+              canvas.before:
+                  Color:
+                      rgba: 0.15, 0.15, 0.15, 1
+                  RoundedRectangle:
+                      pos: self.pos
+                      size: self.size
+                      radius: [8]
+          '''
+
+          Builder.load_string(KV)
+
+          AUDIT = []
+
+
+          def audit(action, detail):
+              AUDIT.append({
+                  'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+                  'action': action,
+                  'detail': str(detail)[:120],
+              })
+
+
+          def get_base():
+              if platform == 'android':
+                  try:
+                      from jnius import autoclass
+                      ctx = autoclass('org.kivy.android.PythonActivity').mActivity
+                      return Path(ctx.getFilesDir().getAbsolutePath())
+                  except Exception:
+                      return Path('.')
+              return Path(__file__).parent.resolve()
+
+
+          BASE = get_base()
+          WORKSPACE = BASE / 'workspace'
+          WORKSPACE.mkdir(parents=True, exist_ok=True)
+          CONFIG_FILE = BASE / 'hedes_config.json'
+
+          DEFAULT_CONFIG = {
+              'slack_token': '',
+              'slack_channel': '#general',
+              'gmail_client_id': '',
+              'gmail_client_secret': '',
+              'gmail_refresh_token': '',
+              'allowed_domains': 'example.com, localhost',
+          }
+
+
+          def load_config():
+              cfg = dict(DEFAULT_CONFIG)
+              if CONFIG_FILE.exists():
+                  try:
+                      cfg.update(json.loads(CONFIG_FILE.read_text()))
+                  except Exception:
+                      pass
+              return cfg
+
+
+          def save_config(cfg):
+              CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+
+          def run_async(fn, cb):
+              def worker():
+                  try:
+                      res = fn()
+                  except Exception as exc:
+                      res = 'Error: ' + str(exc)
+                  Clock.schedule_once(lambda dt: cb(res), 0)
+              threading.Thread(target=worker, daemon=True).start()
+
+
+          def confirm_popup(title, message, on_yes):
+              box = BoxLayout(orientation='vertical', padding=14, spacing=10)
+              lbl = Label(text=message, color=(1, 1, 1, 1))
+              btns = BoxLayout(size_hint_y=None, height='46dp', spacing=10)
+              popup = Popup(title=title, content=box, size_hint=(0.85, 0.45),
+                            background_color=(0.1, 0.1, 0.1, 1), title_color=(1, 1, 1, 1))
+              yes = Factory.HedesButton(text='CONFIRM')
+              no = Factory.HedesButton(text='CANCEL')
+              yes.bind(on_press=lambda x: (popup.dismiss(), on_yes()))
+              no.bind(on_press=lambda x: (popup.dismiss(), audit('denied', title)))
+              btns.add_widget(yes)
+              btns.add_widget(no)
+              box.add_widget(lbl)
+              box.add_widget(btns)
+              popup.open()
+
+
+          def check_url(url, cfg):
+              raw = url.strip()
+              if '://' not in raw:
+                  raw = 'https://' + raw
+              try:
+                  parsed = urlparse(raw)
+              except Exception:
+                  return False, 'Invalid URL'
+              if parsed.scheme not in ('http', 'https'):
+                  return False, 'Only http and https are allowed'
+              host = (parsed.hostname or '').lower()
+              if host.endswith('.onion'):
+                  return False, 'Onion / darkweb addresses are blocked'
+              allowed = [d.strip().lower() for d in cfg['allowed_domains'].split(',') if d.strip()]
+              for domain in allowed:
+                  if host == domain or host.endswith('.' + domain):
+                      return True, parsed.geturl()
+              return False, 'Domain not in your allowlist (see Setup)'
+
+
+          def strip_html(html):
+              text = re.sub(r'<[^>]+>', ' ', html)
+              return re.sub(r'\s+', ' ', text).strip()
+
+
+          def gmail_access_token(cfg):
+              if not cfg['gmail_client_id'] or not cfg['gmail_client_secret'] or not cfg['gmail_refresh_token']:
+                  return None, 'Gmail not configured yet. Open SETUP and add your OAuth values.'
+              resp = requests.post('https://oauth2.googleapis.com/token', data={
+                  'client_id': cfg['gmail_client_id'],
+                  'client_secret': cfg['gmail_client_secret'],
+                  'refresh_token': cfg['gmail_refresh_token'],
+                  'grant_type': 'refresh_token',
+              }, timeout=20)
+              if resp.status_code != 200:
+                  return None, 'Gmail auth failed: ' + resp.text[:150]
+              return resp.json().get('access_token'), ''
+
+
+          def extract_body(payload):
+              queue = [payload] if payload else []
+              while queue:
+                  part = queue.pop(0)
+                  if part.get('mimeType') == 'text/plain' and part.get('body', {}).get('data'):
+                      return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', 'replace')
+                  for sub in part.get('parts') or []:
+                      queue.append(sub)
+              return '(no plain-text body)'
+
+
+          def read_emails(cfg, count):
+              token, err = gmail_access_token(cfg)
+              if not token:
+                  return err
+              headers = {'Authorization': 'Bearer ' + token}
+              listing = requests.get(
+                  'https://gmail.googleapis.com/gmail/v1/users/me/messages',
+                  params={'maxResults': count}, headers=headers, timeout=20).json()
+              items = listing.get('messages') or []
+              if not items:
+                  return 'No messages found.'
+              out = []
+              for item in items[:count]:
+                  msg = requests.get(
+                      'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + item['id'],
+                      params={'format': 'full'}, headers=headers, timeout=20).json()
+                  heads = {h['name'].lower(): h['value'] for h in msg.get('payload', {}).get('headers', [])}
+                  body = extract_body(msg.get('payload', {}))
+                  out.append('FROM: ' + heads.get('from', '?') +
+                             '\nSUBJECT: ' + heads.get('subject', '(none)') +
+                             '\n' + body[:300] + '\n' + ('-' * 32))
+              audit('read_emails', str(len(out)) + ' messages')
+              return '\n'.join(out)
+
+
+          def post_slack(cfg, message, channel):
+              if not cfg['slack_token']:
+                  return 'Slack token not set. Open SETUP first.'
+              resp = requests.post('https://slack.com/api/chat.postMessage',
+                                   headers={'Authorization': 'Bearer ' + cfg['slack_token']},
+                                   json={'channel': channel, 'text': message}, timeout=20)
+              data = resp.json()
+              if data.get('ok'):
+                  audit('post_slack', channel)
+                  return 'Message posted to ' + channel
+              return 'Slack error: ' + data.get('error', 'unknown')
+
+
+          CATEGORIES = {
+              'Images': ['.jpg', '.jpeg', '.png', '.gif', '.webp'],
+              'Documents': ['.pdf', '.txt', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'],
+              'Audio': ['.mp3', '.wav', '.ogg'],
+              'Video': ['.mp4', '.mkv', '.mov'],
+              'Archives': ['.zip', '.rar', '.7z'],
+          }
+
+
+          def organize_files():
+              moved = []
+              for f in [x for x in WORKSPACE.iterdir() if x.is_file()]:
+                  cat = 'Other'
+                  for name, exts in CATEGORIES.items():
+                      if f.suffix.lower() in exts:
+                          cat = name
+                          break
+                  target = WORKSPACE / cat
+                  target.mkdir(exist_ok=True)
+                  dest = target / f.name
+                  i = 1
+                  while dest.exists():
+                      dest = target / (f.stem + '_' + str(i) + f.suffix)
+                      i += 1
+                  f.rename(dest)
+                  moved.append(f.name + '  ->  ' + cat + '/')
+              if not moved:
+                  return 'No loose files in the sandboxed workspace.'
+              audit('organize_files', str(len(moved)) + ' files')
+              return 'Organized ' + str(len(moved)) + ' files:\n' + '\n'.join(moved)
+
+
+          def make_samples():
+              (WORKSPACE / 'photo.jpg').write_bytes(b'\xff\xd8\xff\xe0 sample')
+              (WORKSPACE / 'notes.txt').write_text('sample note')
+              (WORKSPACE / 'track.mp3').write_bytes(b'ID3 sample')
+              (WORKSPACE / 'report.pdf').write_bytes(b'%PDF sample')
+              audit('make_samples', '4 files')
+              return 'Sample files created inside workspace.'
+
+
+          def check_website(cfg, url):
+              ok, info = check_url(url, cfg)
+              if not ok:
+                  audit('blocked_url', url)
+                  return 'BLOCKED: ' + info
+              resp = requests.get(info, timeout=15)
+              audit('check_website', info)
+              return ('URL: ' + info + '\nSTATUS: ' + str(resp.status_code) +
+                      '\nPREVIEW:\n' + strip_html(resp.text)[:400])
+
+
+          def output_view(text=''):
+              scroll = ScrollView()
+              lbl = Label(text=text, color=(0.78, 0.78, 0.78, 1),
+                          size_hint=(1, None), font_size='13sp', valign='top')
+              lbl.text_size = (Window.width - 60, None)
+              lbl.bind(texture_size=lbl.setter('size'))
+              scroll.add_widget(lbl)
+              return scroll, lbl
+
+
+          class BaseScreen(Screen):
+              title_text = ''
+
+              def __init__(self, **kw):
+                  super().__init__(**kw)
+                  root = BoxLayout(orientation='vertical', padding=16, spacing=12)
+                  head = BoxLayout(size_hint_y=None, height='46dp', spacing=10)
+                  back = Factory.HedesButton(text='< BACK')
+                  back.bind(on_press=lambda x: self.go_home())
+                  head.add_widget(back)
+                  head.add_widget(Label(text='[b]' + self.title_text + '[/b]', markup=True,
+                                        color=(1, 1, 1, 1), font_size='19sp'))
+                  root.add_widget(head)
+                  self.content = BoxLayout(orientation='vertical', spacing=10)
+                  root.add_widget(self.content)
+                  self.add_widget(root)
+                  self.build()
+
+              def go_home(self):
+                  self.manager.current = 'home'
+
+              def build(self):
+                  pass
+
+
+          class HomeScreen(Screen):
+              def __init__(self, **kw):
+                  super().__init__(**kw)
+                  root = BoxLayout(orientation='vertical', padding=18, spacing=10)
+                  root.add_widget(Label(text='[size=32][b]HEDES[/b][/size]', markup=True,
+                                        color=(1, 1, 1, 1), size_hint_y=None, height='56dp'))
+                  root.add_widget(Label(text='safe ai agent - monochrome edition',
+                                        color=(0.6, 0.6, 0.6, 1), size_hint_y=None, height='22dp'))
+                  cards = [
+                      ('READ EMAILS\nsummarize gmail inbox', 'email'),
+                      ('POST TO SLACK\nconfirmation required', 'slack'),
+                      ('ORGANIZE FILES\nsandboxed workspace only', 'files'),
+                      ('CHECK WEBSITE\nallowlisted domains only', 'web'),
+                      ('AUDIT LOG\nevery action recorded', 'audit'),
+                      ('SETUP\ntokens and allowlist', 'setup'),
+                  ]
+                  grid = GridLayout(cols=1, spacing=10, size_hint_y=None)
+                  grid.bind(minimum_height=grid.setter('height'))
+                  for text, target in cards:
+                      btn = Factory.HedesButton(text=text, height='62dp')
+                      btn.bind(on_press=lambda x, t=target: self.goto(t))
+                      grid.add_widget(btn)
+                  scroll = ScrollView()
+                  scroll.add_widget(grid)
+                  root.add_widget(scroll)
+                  root.add_widget(Label(text='v1.0 - permission based - no root - no darkweb',
+                                        color=(0.4, 0.4, 0.4, 1), size_hint_y=None, height='20dp'))
+                  self.add_widget(root)
+
+              def goto(self, target):
+                  self.manager.current = target
+
+
+          class EmailScreen(BaseScreen):
+              title_text = 'GMAIL READER'
+
+              def build(self):
+                  self.content.add_widget(Label(text='Number of emails to read:',
+                                                color=(0.8, 0.8, 0.8, 1), size_hint_y=None, height='22dp'))
+                  self.count = Factory.HedesInput(text='10', input_filter='int')
+                  self.content.add_widget(self.count)
+                  btn = Factory.HedesButton(text='FETCH AND SUMMARIZE')
+                  btn.bind(on_press=lambda x: confirm_popup(
+                      'Read emails', 'Allow Hedes to read your Gmail inbox (read-only)?', self.fetch))
+                  self.content.add_widget(btn)
+                  self.scroll, self.out = output_view('Results appear here after fetching.')
+                  self.content.add_widget(self.scroll)
+
+              def fetch(self):
+                  self.out.text = 'Loading inbox...'
+                  cfg = load_config()
+                  try:
+                      n = max(1, int(self.count.text or '10'))
+                  except ValueError:
+                      n = 10
+                  run_async(lambda: read_emails(cfg, n), lambda res: setattr(self.out, 'text', res))
+
+
+          class SlackScreen(BaseScreen):
+              title_text = 'SLACK POSTER'
+
+              def build(self):
+                  self.content.add_widget(Label(text='Channel:', color=(0.8, 0.8, 0.8, 1),
+                                                size_hint_y=None, height='22dp'))
+                  self.channel = Factory.HedesInput(text=load_config()['slack_channel'])
+                  self.content.add_widget(self.channel)
+                  self.content.add_widget(Label(text='Message:', color=(0.8, 0.8, 0.8, 1),
+                                                size_hint_y=None, height='22dp'))
+                  self.message = Factory.HedesInput(multiline=True, height='110dp')
+                  self.content.add_widget(self.message)
+                  btn = Factory.HedesButton(text='SEND MESSAGE')
+                  btn.bind(on_press=lambda x: self.ask())
+                  self.content.add_widget(btn)
+                  self.scroll, self.out = output_view('')
+                  self.content.add_widget(self.scroll)
+
+              def ask(self):
+                  msg = self.message.text.strip()
+                  if not msg:
+                      self.out.text = 'Type a message first.'
+                      return
+                  confirm_popup('Post to Slack',
+                                'Send this message to ' + self.channel.text + '?\n\n' + msg[:120],
+                                lambda: self.send(msg))
+
+              def send(self, msg):
+                  cfg = load_config()
+                  self.out.text = 'Sending...'
+                  run_async(lambda: post_slack(cfg, msg, self.channel.text.strip()), self.done)
+
+              def done(self, res):
+                  self.out.text = res
+                  if res.startswith('Message posted'):
+                      self.message.text = ''
+
+
+          class FilesScreen(BaseScreen):
+              title_text = 'FILE ORGANIZER'
+
+              def build(self):
+                  self.content.add_widget(Label(
+                      text='Files are organized only inside the sandboxed workspace folder of this app.',
+                      color=(0.75, 0.75, 0.75, 1), size_hint_y=None, height='40dp'))
+                  b1 = Factory.HedesButton(text='ORGANIZE WORKSPACE')
+                  b1.bind(on_press=lambda x: confirm_popup(
+                      'Organize files', 'Sort all loose files in workspace into type folders?', self.run_org))
+                  self.content.add_widget(b1)
+                  b2 = Factory.HedesButton(text='CREATE SAMPLE FILES')
+                  b2.bind(on_press=lambda x: setattr(self.out, 'text', make_samples()))
+                  self.content.add_widget(b2)
+                  self.scroll, self.out = output_view('No actions yet.')
+                  self.content.add_widget(self.scroll)
+
+              def run_org(self):
+                  self.out.text = 'Organizing...'
+                  run_async(organize_files, lambda res: setattr(self.out, 'text', res))
+
+
+          class WebScreen(BaseScreen):
+              title_text = 'WEBSITE CHECK'
+
+              def build(self):
+                  self.content.add_widget(Label(text='URL (must match your allowlist):',
+                                                color=(0.8, 0.8, 0.8, 1), size_hint_y=None, height='22dp'))
+                  self.url = Factory.HedesInput(text='https://example.com')
+                  self.content.add_widget(self.url)
+                  btn = Factory.HedesButton(text='CHECK STATUS')
+                  btn.bind(on_press=lambda x: self.run())
+                  self.content.add_widget(btn)
+                  self.scroll, self.out = output_view('')
+                  self.content.add_widget(self.scroll)
+
+              def run(self):
+                  cfg = load_config()
+                  target = self.url.text.strip()
+                  if not target:
+                      self.out.text = 'Enter a URL first.'
+                      return
+                  self.out.text = 'Checking...'
+                  run_async(lambda: check_website(cfg, 
