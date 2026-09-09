@@ -464,4 +464,135 @@ jobs:
                       self.out.text = 'Enter a URL first.'
                       return
                   self.out.text = 'Checking...'
-                  run_async(lambda: check_website(cfg, 
+                  run_async(lambda: check_website(cfg, target), lambda res: setattr(self.out, 'text', res))
+
+
+          class AuditScreen(BaseScreen):
+              title_text = 'AUDIT LOG'
+
+              def build(self):
+                  self.scroll, self.out = output_view('')
+                  self.content.add_widget(self.scroll)
+
+              def on_pre_enter(self, *args):
+                  if not AUDIT:
+                      self.out.text = 'No actions recorded yet this session.'
+                  else:
+                      lines = [e['time'] + '  ' + e['action'] + '  -  ' + e['detail'] for e in AUDIT]
+                      self.out.text = '\n'.join(lines)
+
+
+          class SetupScreen(BaseScreen):
+              title_text = 'SETUP'
+
+              def build(self):
+                  cfg = load_config()
+                  self.fields = {}
+                  labels = [
+                      ('slack_token', 'Slack bot token'),
+                      ('slack_channel', 'Slack channel'),
+                      ('gmail_client_id', 'Gmail OAuth client id'),
+                      ('gmail_client_secret', 'Gmail OAuth client secret'),
+                      ('gmail_refresh_token', 'Gmail refresh token'),
+                      ('allowed_domains', 'Allowed domains (comma separated)'),
+                  ]
+                  scroll = ScrollView()
+                  inner = BoxLayout(orientation='vertical', spacing=8, size_hint_y=None)
+                  inner.bind(minimum_height=inner.setter('height'))
+                  for key, label in labels:
+                      inner.add_widget(Label(text=label + ':', color=(0.8, 0.8, 0.8, 1),
+                                             size_hint_y=None, height='20dp'))
+                      hidden = key in ('slack_token', 'gmail_client_secret', 'gmail_refresh_token')
+                      ti = Factory.HedesInput(text=cfg.get(key, ''), password=hidden)
+                      inner.add_widget(ti)
+                      self.fields[key] = ti
+                  btn = Factory.HedesButton(text='SAVE SETTINGS')
+                  btn.bind(on_press=lambda x: self.save())
+                  inner.add_widget(btn)
+                  self.msg = Label(text='', color=(0.75, 0.75, 0.75, 1), size_hint_y=None, height='30dp')
+                  inner.add_widget(self.msg)
+                  scroll.add_widget(inner)
+                  self.content.add_widget(scroll)
+
+              def save(self):
+                  cfg = load_config()
+                  for key, ti in self.fields.items():
+                      cfg[key] = ti.text.strip()
+                  save_config(cfg)
+                  audit('save_config', 'settings updated')
+                  self.msg.text = 'Settings saved on this device.'
+
+
+          class HedesApp(App):
+              title = 'Hedes'
+
+              def build(self):
+                  sm = ScreenManager()
+                  sm.add_widget(HomeScreen(name='home'))
+                  sm.add_widget(EmailScreen(name='email'))
+                  sm.add_widget(SlackScreen(name='slack'))
+                  sm.add_widget(FilesScreen(name='files'))
+                  sm.add_widget(WebScreen(name='web'))
+                  sm.add_widget(AuditScreen(name='audit'))
+                  sm.add_widget(SetupScreen(name='setup'))
+                  return sm
+
+
+          if __name__ == '__main__':
+              HedesApp().run()
+          PYEOF
+          cat > buildozer.spec << 'SPECEOF'
+          [app]
+          title = Hedes
+          package.name = hedes
+          package.domain = org.hedes.agent
+          source.dir = .
+          source.include_exts = py,png,jpg,kv,atlas,json
+          version = 1.0
+          requirements = python3,kivy==2.2.1,requests
+          orientation = portrait
+          fullscreen = 0
+          android.permissions = INTERNET
+          android.api = 33
+          android.minapi = 21
+          android.arch = arm64-v8a
+          android.accept_sdk_license = True
+          android.allow_backup = False
+          icon.filename = assets/icon.png
+          presplash.filename = assets/icon.png
+
+          [buildozer]
+          log_level = 2
+          warn_on_root = 1
+          SPECEOF
+          python3 - << 'ICONEOF'
+          from PIL import Image, ImageDraw
+          img = Image.new('RGB', (512, 512), (255, 255, 255))
+          d = ImageDraw.Draw(img)
+          d.rectangle([176, 108, 248, 404], fill=(0, 0, 0))
+          d.rectangle([332, 108, 404, 404], fill=(0, 0, 0))
+          d.rectangle([176, 220, 404, 292], fill=(0, 0, 0))
+          img.save('assets/icon.png')
+          ICONEOF
+          ls -la
+      - name: Cache buildozer
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-v1
+      - name: Install build tools
+        run: |
+          python3 -m pip install --upgrade pip buildozer cython
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential git libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good openjdk-17-jdk autoconf libtool pkg-config
+      - name: Build APK
+        run: |
+          sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java || true
+          sudo update-alternatives --set javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac || true
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+          buildozer -v android debug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hedes-apk
+          path: bin/*.apk
