@@ -1,0 +1,6 @@
+#	Filename (type exactly)	Paste block	Last line must be
+1	.github/workflows/build.yml	File 1 block	          path: bin/*.apk
+2	parts/p1.txt	File 2 block	    return re.sub(r'\s+', ' ', text).strip()
+3	parts/p2.txt	File 3 block	        self.manager.current = target
+4	parts/p3.txt	File 4 block	    HedesApp().run()
+5	parts/spec.txt	File 5 block	warn_on_root = 1
