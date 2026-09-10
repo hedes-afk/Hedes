@@ -1,0 +1,48 @@
+name: Build Hedes APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Assemble app files
+        run: |
+          mkdir -p assets
+          { cat parts/p1.txt; echo; cat parts/p2.txt; echo; cat parts/p3.txt; } > main.py
+          cp parts/spec.txt buildozer.spec
+          python3 - << 'ICONEOF'
+          from PIL import Image, ImageDraw
+          img = Image.new('RGB', (512, 512), (255, 255, 255))
+          d = ImageDraw.Draw(img)
+          d.rectangle([176, 108, 248, 404], fill=(0, 0, 0))
+          d.rectangle([332, 108, 404, 404], fill=(0, 0, 0))
+          d.rectangle([176, 220, 404, 292], fill=(0, 0, 0))
+          img.save('assets/icon.png')
+          ICONEOF
+          wc -l main.py
+          python3 -m py_compile main.py && echo SYNTAX_OK
+      - name: Cache buildozer
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-v1
+      - name: Install build tools
+        run: |
+          python3 -m pip install --upgrade pip buildozer cython
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential git libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good openjdk-17-jdk autoconf libtool pkg-config
+      - name: Build APK
+        run: |
+          sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java || true
+          sudo update-alternatives --set javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac || true
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+          buildozer -v android debug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hedes-apk
+          path: bin/*.apk
