@@ -1,0 +1,182 @@
+class EmailScreen(BaseScreen):
+    title_text = 'GMAIL READER'
+
+    def build(self):
+        self.content.add_widget(Label(text='Number of emails to read:',
+                                      color=(0.8, 0.8, 0.8, 1), size_hint_y=None, height='22dp'))
+        self.count = Factory.HedesInput(text='10', input_filter='int')
+        self.content.add_widget(self.count)
+        btn = Factory.HedesButton(text='FETCH AND SUMMARIZE')
+        btn.bind(on_press=lambda x: confirm_popup(
+            'Read emails', 'Allow Hedes to read your Gmail inbox (read-only)?', self.fetch))
+        self.content.add_widget(btn)
+        self.scroll, self.out = output_view('Results appear here after fetching.')
+        self.content.add_widget(self.scroll)
+
+    def fetch(self):
+        self.out.text = 'Loading inbox...'
+        cfg = load_config()
+        try:
+            n = max(1, int(self.count.text or '10'))
+        except ValueError:
+            n = 10
+        run_async(lambda: read_emails(cfg, n), lambda res: setattr(self.out, 'text', res))
+
+
+class SlackScreen(BaseScreen):
+    title_text = 'SLACK POSTER'
+
+    def build(self):
+        self.content.add_widget(Label(text='Channel:', color=(0.8, 0.8, 0.8, 1),
+                                      size_hint_y=None, height='22dp'))
+        self.channel = Factory.HedesInput(text=load_config()['slack_channel'])
+        self.content.add_widget(self.channel)
+        self.content.add_widget(Label(text='Message:', color=(0.8, 0.8, 0.8, 1),
+                                      size_hint_y=None, height='22dp'))
+        self.message = Factory.HedesInput(multiline=True, height='110dp')
+        self.content.add_widget(self.message)
+        btn = Factory.HedesButton(text='SEND MESSAGE')
+        btn.bind(on_press=lambda x: self.ask())
+        self.content.add_widget(btn)
+        self.scroll, self.out = output_view('')
+        self.content.add_widget(self.scroll)
+
+    def ask(self):
+        msg = self.message.text.strip()
+        if not msg:
+            self.out.text = 'Type a message first.'
+            return
+        confirm_popup('Post to Slack',
+                      'Send this message to ' + self.channel.text + '?\n\n' + msg[:120],
+                      lambda: self.send(msg))
+
+    def send(self, msg):
+        cfg = load_config()
+        self.out.text = 'Sending...'
+        run_async(lambda: post_slack(cfg, msg, self.channel.text.strip()), self.done)
+
+    def done(self, res):
+        self.out.text = res
+        if res.startswith('Message posted'):
+            self.message.text = ''
+
+
+class FilesScreen(BaseScreen):
+    title_text = 'FILE ORGANIZER'
+
+    def build(self):
+        self.content.add_widget(Label(
+            text='Files are organized only inside the sandboxed workspace folder of this app.',
+            color=(0.75, 0.75, 0.75, 1), size_hint_y=None, height='40dp'))
+        b1 = Factory.HedesButton(text='ORGANIZE WORKSPACE')
+        b1.bind(on_press=lambda x: confirm_popup(
+            'Organize files', 'Sort all loose files in workspace into type folders?', self.run_org))
+        self.content.add_widget(b1)
+        b2 = Factory.HedesButton(text='CREATE SAMPLE FILES')
+        b2.bind(on_press=lambda x: setattr(self.out, 'text', make_samples()))
+        self.content.add_widget(b2)
+        self.scroll, self.out = output_view('No actions yet.')
+        self.content.add_widget(self.scroll)
+
+    def run_org(self):
+        self.out.text = 'Organizing...'
+        run_async(organize_files, lambda res: setattr(self.out, 'text', res))
+
+
+class WebScreen(BaseScreen):
+    title_text = 'WEBSITE CHECK'
+
+    def build(self):
+        self.content.add_widget(Label(text='URL (must match your allowlist):',
+                                      color=(0.8, 0.8, 0.8, 1), size_hint_y=None, height='22dp'))
+        self.url = Factory.HedesInput(text='https://example.com')
+        self.content.add_widget(self.url)
+        btn = Factory.HedesButton(text='CHECK STATUS')
+        btn.bind(on_press=lambda x: self.run())
+        self.content.add_widget(btn)
+        self.scroll, self.out = output_view('')
+        self.content.add_widget(self.scroll)
+
+    def run(self):
+        cfg = load_config()
+        target = self.url.text.strip()
+        if not target:
+            self.out.text = 'Enter a URL first.'
+            return
+        self.out.text = 'Checking...'
+        run_async(lambda: check_website(cfg, target), lambda res: setattr(self.out, 'text', res))
+
+
+class AuditScreen(BaseScreen):
+    title_text = 'AUDIT LOG'
+
+    def build(self):
+        self.scroll, self.out = output_view('')
+        self.content.add_widget(self.scroll)
+
+    def on_pre_enter(self, *args):
+        if not AUDIT:
+            self.out.text = 'No actions recorded yet this session.'
+        else:
+            lines = [e['time'] + '  ' + e['action'] + '  -  ' + e['detail'] for e in AUDIT]
+            self.out.text = '\n'.join(lines)
+
+
+class SetupScreen(BaseScreen):
+    title_text = 'SETUP'
+
+    def build(self):
+        cfg = load_config()
+        self.fields = {}
+        labels = [
+            ('slack_token', 'Slack bot token'),
+            ('slack_channel', 'Slack channel'),
+            ('gmail_client_id', 'Gmail OAuth client id'),
+            ('gmail_client_secret', 'Gmail OAuth client secret'),
+            ('gmail_refresh_token', 'Gmail refresh token'),
+            ('allowed_domains', 'Allowed domains (comma separated)'),
+        ]
+        scroll = ScrollView()
+        inner = BoxLayout(orientation='vertical', spacing=8, size_hint_y=None)
+        inner.bind(minimum_height=inner.setter('height'))
+        for key, label in labels:
+            inner.add_widget(Label(text=label + ':', color=(0.8, 0.8, 0.8, 1),
+                                   size_hint_y=None, height='20dp'))
+            hidden = key in ('slack_token', 'gmail_client_secret', 'gmail_refresh_token')
+            ti = Factory.HedesInput(text=cfg.get(key, ''), password=hidden)
+            inner.add_widget(ti)
+            self.fields[key] = ti
+        btn = Factory.HedesButton(text='SAVE SETTINGS')
+        btn.bind(on_press=lambda x: self.save())
+        inner.add_widget(btn)
+        self.msg = Label(text='', color=(0.75, 0.75, 0.75, 1), size_hint_y=None, height='30dp')
+        inner.add_widget(self.msg)
+        scroll.add_widget(inner)
+        self.content.add_widget(scroll)
+
+    def save(self):
+        cfg = load_config()
+        for key, ti in self.fields.items():
+            cfg[key] = ti.text.strip()
+        save_config(cfg)
+        audit('save_config', 'settings updated')
+        self.msg.text = 'Settings saved on this device.'
+
+
+class HedesApp(App):
+    title = 'Hedes'
+
+    def build(self):
+        sm = ScreenManager()
+        sm.add_widget(HomeScreen(name='home'))
+        sm.add_widget(EmailScreen(name='email'))
+        sm.add_widget(SlackScreen(name='slack'))
+        sm.add_widget(FilesScreen(name='files'))
+        sm.add_widget(WebScreen(name='web'))
+        sm.add_widget(AuditScreen(name='audit'))
+        sm.add_widget(SetupScreen(name='setup'))
+        return sm
+
+
+if __name__ == '__main__':
+    HedesApp().run()
